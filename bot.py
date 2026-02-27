@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import time
 from collections import deque
 
 from dotenv import load_dotenv
@@ -54,9 +55,13 @@ SYSTEM_PROMPT = f"""Ты — бот-копия пользователя @{TARGET
 MAX_HISTORY = 80
 chat_histories: dict[int, deque] = {}
 
-# Сообщения от @yersh9 для изучения стиля
 yersh_messages: dict[int, deque] = {}
 MAX_YERSH_MESSAGES = 50
+
+# Timestamps последних сообщений для определения активности чата
+chat_activity: dict[int, deque] = {}
+ACTIVITY_WINDOW = 300  # 5 минут
+MIN_MESSAGES_FOR_ACTIVE = 4  # сколько сообщений за 5 мин = "активный чат"
 
 
 def get_history(chat_id: int) -> deque:
@@ -69,6 +74,20 @@ def get_yersh_messages(chat_id: int) -> deque:
     if chat_id not in yersh_messages:
         yersh_messages[chat_id] = deque(maxlen=MAX_YERSH_MESSAGES)
     return yersh_messages[chat_id]
+
+
+def track_activity(chat_id: int):
+    if chat_id not in chat_activity:
+        chat_activity[chat_id] = deque(maxlen=50)
+    chat_activity[chat_id].append(time.time())
+
+
+def is_chat_active(chat_id: int) -> bool:
+    if chat_id not in chat_activity:
+        return False
+    now = time.time()
+    recent = sum(1 for t in chat_activity[chat_id] if now - t < ACTIVITY_WINDOW)
+    return recent >= MIN_MESSAGES_FOR_ACTIVE
 
 
 def build_style_reference(chat_id: int) -> str:
@@ -88,18 +107,26 @@ def should_respond(update: Update, bot_username: str) -> bool:
         return False
 
     text = message.text.lower()
+    chat_id = message.chat_id
 
+    # Тегнули бота — всегда отвечает
     if bot_username and f"@{bot_username.lower()}" in text:
         return True
 
+    # Ответили на сообщение бота — всегда отвечает
     if message.reply_to_message and message.reply_to_message.from_user:
         if message.reply_to_message.from_user.is_bot:
             return True
 
+    # Упомянули ерша — всегда отвечает
     if TARGET_USERNAME.lower() in text or "ерш" in text or "yersh" in text:
         return True
 
-    return random.random() < RESPONSE_CHANCE
+    # Рандомно 30%, но только если чат активен
+    if is_chat_active(chat_id):
+        return random.random() < RESPONSE_CHANCE
+
+    return False
 
 
 def generate_response(chat_id: int, history: deque) -> str:
@@ -139,6 +166,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = message.from_user.username or ""
     first_name = message.from_user.first_name or ""
     display_name = f"@{username}" if username else first_name
+
+    track_activity(chat_id)
 
     is_from_target = username.lower() == TARGET_USERNAME.lower() if username else False
     if is_from_target:
